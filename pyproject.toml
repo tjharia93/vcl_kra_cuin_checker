@@ -1,0 +1,19 @@
+[project]
+name = "vcl_kra_validation"
+authors = [
+    { name = "Vimit Converters Limited", email = "it@vimitconverters.com"}
+]
+description = "KRA eTIMS CUIN validation for ERPNext Purchase Invoices"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    # Frappe bench already provides: frappe, erpnext, requests
+]
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.flit.module]
+name = "vcl_kra_validation"
