@@ -241,3 +241,69 @@ if (!frm.doc.custom_kra_total_amount) {
 
 At that point, consider bumping `__version__` to `0.2.0` in
 `vcl_kra_validation/__init__.py` and tagging the release.
+
+## 11. Back-filling historical Purchase Invoices
+
+Installing the app adds the four KRA custom fields to every existing Purchase
+Invoice row as **NULL** — the Client Script only fires when a user edits a
+form, so old records are not auto-populated. Run the back-fill script below
+**after UAT sign-off** to retrofit historical PIs.
+
+Script: `vcl_kra_validation/scripts/backfill_kra_fields.py`
+Entry point: `vcl_kra_validation.scripts.backfill_kra_fields.run`
+
+Behaviour:
+- Picks only PIs where `bill_no` is set AND `custom_kra_total_amount` is empty
+  (idempotent: reruns skip rows already populated).
+- Works on both draft (`docstatus=0`) and submitted (`docstatus=1`) PIs via
+  `frappe.db.set_value` (bypasses `allow_on_submit`). Cancelled PIs are skipped.
+- Calls `validate_cuin` once per row; `sleep` seconds between calls to avoid
+  hammering KRA iTax.
+- Slash-CUIns and rows KRA can't find are logged as SKIP and left untouched.
+- Exceptions are captured to **Frappe → Error Log** and counted as ERR.
+
+### Step-by-step (Frappe Cloud)
+
+1. **Prerequisite:** this branch is merged to `main` and the bench has been
+   redeployed so the script ships in the live build.
+
+2. **Dry-run the first 10 rows** (no writes — just prints what it would do):
+
+   - *Path A — Dashboard Console (no SSH):*
+     Frappe Cloud dashboard → Site → **Consoles → Bench Console** → paste:
+     ```python
+     from vcl_kra_validation.scripts.backfill_kra_fields import run
+     run(dry_run=True, limit=10)
+     ```
+
+   - *Path B — SSH `bench execute` (Private Bench / SSH access):*
+     ```bash
+     bench --site vimitconverters.frappe.cloud execute \
+       vcl_kra_validation.scripts.backfill_kra_fields.run \
+       --kwargs "{'dry_run': True, 'limit': 10}"
+     ```
+
+3. **Review the output.** Expect lines like:
+   ```
+   WOULD ACC-PINV-2026-00042 | 0190438130000017933 | AWANAD ENTERPRISES LIMITED | tax=15740.96 total=114121.96
+   ```
+   plus a final summary `{'updated': 10, 'skipped': 0, 'errored': 0, 'remaining': N}`.
+   If the output looks wrong, stop and investigate — nothing was written.
+
+4. **Apply the first 10 for real:**
+   ```python
+   run(dry_run=False, limit=10)
+   ```
+   Open 1–2 of the updated PIs in Desk and confirm the four KRA fields are
+   populated.
+
+5. **Work through the rest in batches of 50** (pause ~1 s between KRA calls):
+   ```python
+   run(dry_run=False, limit=50, sleep=1.0)
+   ```
+   Re-invoke until the summary reports `remaining=0`. Each call is safely
+   resumable — if a batch is interrupted, the next call picks up where it
+   left off because already-populated rows no longer match the filter.
+
+6. **Audit:** after completion, check **Frappe → Error Log** for any rows
+   titled "KRA backfill: exception" and triage.
