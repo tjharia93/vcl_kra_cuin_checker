@@ -2,18 +2,42 @@
 // Installed via fixture by the vcl_kra_validation app. Do not edit in place;
 // update the fixture source in the app repo and redeploy.
 
-frappe.ui.form.on('Purchase Invoice', {
-    bill_no(frm) {
-        const cuin = (frm.doc.bill_no || '').trim();
-        const kra_fields = [
-            'custom_kra_supplier_name',
-            'custom_kra_invoice_number',
-            'custom_kra_tax_amount',
-            'custom_kra_total_amount',
-        ];
+const VCL_KRA_TYPE = 'Local Purchase';
+const VCL_KRA_FIELDS = [
+    'custom_kra_supplier_name',
+    'custom_kra_invoice_number',
+    'custom_kra_tax_amount',
+    'custom_kra_total_amount',
+];
 
+function isLocalPurchase(frm) {
+    return (frm.doc.custom_purchase_invoice_type || '').trim() === VCL_KRA_TYPE;
+}
+
+function clearKraFields(frm) {
+    VCL_KRA_FIELDS.forEach((f) => frm.set_value(f, null));
+}
+
+frappe.ui.form.on('Purchase Invoice', {
+    custom_purchase_invoice_type(frm) {
+        if (!isLocalPurchase(frm)) {
+            clearKraFields(frm);
+            return;
+        }
+        if (frm.doc.bill_no) {
+            frm.trigger('bill_no');
+        }
+    },
+
+    bill_no(frm) {
+        if (!isLocalPurchase(frm)) {
+            clearKraFields(frm);
+            return;
+        }
+
+        const cuin = (frm.doc.bill_no || '').trim();
         if (!cuin) {
-            kra_fields.forEach((f) => frm.set_value(f, null));
+            clearKraFields(frm);
             return;
         }
 
@@ -25,7 +49,7 @@ frappe.ui.form.on('Purchase Invoice', {
             callback(r) {
                 const d = r.message || {};
                 if (!d.valid) {
-                    kra_fields.forEach((f) => frm.set_value(f, null));
+                    clearKraFields(frm);
                     frappe.show_alert(
                         { message: __('KRA: ') + (d.error || 'invalid CUIN'), indicator: 'red' },
                         10
@@ -64,6 +88,8 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     validate(frm) {
+        if (!isLocalPurchase(frm)) return;
+
         const kra_total = frm.doc.custom_kra_total_amount;
         const kra_tax = frm.doc.custom_kra_tax_amount;
         if (!kra_total && !kra_tax) return; // no KRA data loaded — nothing to compare
@@ -104,6 +130,8 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     before_submit(frm) {
+        if (!isLocalPurchase(frm)) return;
+
         const errors = [];
 
         if (!frm.doc.bill_no) {
