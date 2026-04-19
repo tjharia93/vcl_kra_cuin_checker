@@ -102,4 +102,55 @@ frappe.ui.form.on('Purchase Invoice', {
             });
         }
     },
+
+    before_submit(frm) {
+        const errors = [];
+
+        if (!frm.doc.bill_no) {
+            errors.push(__('Supplier Invoice No. is required.'));
+        } else if (!frm.doc.custom_kra_total_amount) {
+            errors.push(
+                __(
+                    'Supplier Invoice No. <b>{0}</b> has not been validated against KRA iTax (or KRA did not recognise it). The invoice can be saved as a Draft, but cannot be submitted until a valid KRA CUIN populates the KRA fields below.',
+                    [frm.doc.bill_no]
+                )
+            );
+        } else {
+            const tolerance = 1.0;
+            const gt = flt(frm.doc.grand_total);
+            const tt = flt(frm.doc.total_taxes_and_charges);
+            const kt = flt(frm.doc.custom_kra_total_amount);
+            const kx = flt(frm.doc.custom_kra_tax_amount);
+
+            if (Math.abs(gt - kt) > tolerance) {
+                errors.push(
+                    __('Grand Total {0} does not match KRA Total {1}.', [
+                        format_currency(gt, frm.doc.currency || 'KES'),
+                        format_currency(kt, frm.doc.currency || 'KES'),
+                    ])
+                );
+            }
+            if (Math.abs(tt - kx) > tolerance) {
+                errors.push(
+                    __('Total Taxes {0} does not match KRA Tax {1}.', [
+                        format_currency(tt, frm.doc.currency || 'KES'),
+                        format_currency(kx, frm.doc.currency || 'KES'),
+                    ])
+                );
+            }
+        }
+
+        if (errors.length) {
+            frappe.throw({
+                title: __('KRA validation — cannot submit'),
+                message:
+                    __('This Purchase Invoice cannot be submitted until the following are resolved:') +
+                    '<br><br>• ' +
+                    errors.join('<br><br>• ') +
+                    '<br><br>' +
+                    __('You can still Save the invoice as a Draft.'),
+                indicator: 'red',
+            });
+        }
+    },
 });
