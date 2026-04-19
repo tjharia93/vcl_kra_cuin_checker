@@ -2,18 +2,42 @@
 // Installed via fixture by the vcl_kra_validation app. Do not edit in place;
 // update the fixture source in the app repo and redeploy.
 
-frappe.ui.form.on('Purchase Invoice', {
-    bill_no(frm) {
-        const cuin = (frm.doc.bill_no || '').trim();
-        const kra_fields = [
-            'custom_kra_supplier_name',
-            'custom_kra_invoice_number',
-            'custom_kra_tax_amount',
-            'custom_kra_total_amount',
-        ];
+const VCL_KRA_TYPE = 'Local Purchase';
+const VCL_KRA_FIELDS = [
+    'custom_kra_supplier_name',
+    'custom_kra_invoice_number',
+    'custom_kra_tax_amount',
+    'custom_kra_total_amount',
+];
 
+function isLocalPurchase(frm) {
+    return (frm.doc.custom_purchase_invoice_type || '').trim() === VCL_KRA_TYPE;
+}
+
+function clearKraFields(frm) {
+    VCL_KRA_FIELDS.forEach((f) => frm.set_value(f, null));
+}
+
+frappe.ui.form.on('Purchase Invoice', {
+    custom_purchase_invoice_type(frm) {
+        if (!isLocalPurchase(frm)) {
+            clearKraFields(frm);
+            return;
+        }
+        if (frm.doc.bill_no) {
+            frm.trigger('bill_no');
+        }
+    },
+
+    bill_no(frm) {
+        if (!isLocalPurchase(frm)) {
+            clearKraFields(frm);
+            return;
+        }
+
+        const cuin = (frm.doc.bill_no || '').trim();
         if (!cuin) {
-            kra_fields.forEach((f) => frm.set_value(f, null));
+            clearKraFields(frm);
             return;
         }
 
@@ -25,7 +49,7 @@ frappe.ui.form.on('Purchase Invoice', {
             callback(r) {
                 const d = r.message || {};
                 if (!d.valid) {
-                    kra_fields.forEach((f) => frm.set_value(f, null));
+                    clearKraFields(frm);
                     frappe.show_alert(
                         { message: __('KRA: ') + (d.error || 'invalid CUIN'), indicator: 'red' },
                         10
@@ -51,8 +75,8 @@ frappe.ui.form.on('Purchase Invoice', {
                         {
                             message: __('KRA: {0} — Tax {1}, Total {2}', [
                                 d.supplier_name,
-                                format_currency(d.tax_amt, frm.doc.currency || 'KES'),
-                                format_currency(d.total_inv_amt, frm.doc.currency || 'KES'),
+                                format_currency(d.tax_amt, 'KES'),
+                                format_currency(d.total_inv_amt, 'KES'),
                             ]),
                             indicator: 'green',
                         },
@@ -64,29 +88,34 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     validate(frm) {
+        if (!isLocalPurchase(frm)) return;
+
         const kra_total = frm.doc.custom_kra_total_amount;
         const kra_tax = frm.doc.custom_kra_tax_amount;
         if (!kra_total && !kra_tax) return; // no KRA data loaded — nothing to compare
 
+        // KRA always reports in KES (base currency). Compare against the invoice's
+        // base-currency totals, not the transaction-currency totals, otherwise a
+        // USD-denominated PI with correct numbers flags as a mismatch.
         const tolerance = 1.0; // KES 1
         const diffs = [];
 
-        const gt = flt(frm.doc.grand_total);
-        const tt = flt(frm.doc.total_taxes_and_charges);
+        const gt = flt(frm.doc.base_grand_total);
+        const tt = flt(frm.doc.base_total_taxes_and_charges);
 
         if (Math.abs(gt - flt(kra_total)) > tolerance) {
             diffs.push(
-                __('Grand Total {0} does not match KRA Total {1}', [
-                    format_currency(gt, frm.doc.currency || 'KES'),
-                    format_currency(kra_total, frm.doc.currency || 'KES'),
+                __('Grand Total (base) {0} does not match KRA Total {1}', [
+                    format_currency(gt, 'KES'),
+                    format_currency(kra_total, 'KES'),
                 ])
             );
         }
         if (Math.abs(tt - flt(kra_tax)) > tolerance) {
             diffs.push(
-                __('Total Taxes {0} does not match KRA Tax {1}', [
-                    format_currency(tt, frm.doc.currency || 'KES'),
-                    format_currency(kra_tax, frm.doc.currency || 'KES'),
+                __('Total Taxes (base) {0} does not match KRA Tax {1}', [
+                    format_currency(tt, 'KES'),
+                    format_currency(kra_tax, 'KES'),
                 ])
             );
         }
@@ -99,6 +128,60 @@ frappe.ui.form.on('Purchase Invoice', {
                     '<br>• ' +
                     diffs.join('<br>• '),
                 indicator: 'orange',
+            });
+        }
+    },
+
+    before_submit(frm) {
+        if (!isLocalPurchase(frm)) return;
+
+        const errors = [];
+
+        if (!frm.doc.bill_no) {
+            errors.push(__('Supplier Invoice No. is required.'));
+        } else if (!frm.doc.custom_kra_total_amount) {
+            errors.push(
+                __(
+                    'Supplier Invoice No. <b>{0}</b> has not been validated against KRA iTax (or KRA did not recognise it). The invoice can be saved as a Draft, but cannot be submitted until a valid KRA CUIN populates the KRA fields below.',
+                    [frm.doc.bill_no]
+                )
+            );
+        } else {
+            // Compare against base-currency totals because KRA always reports KES.
+            const tolerance = 1.0;
+            const gt = flt(frm.doc.base_grand_total);
+            const tt = flt(frm.doc.base_total_taxes_and_charges);
+            const kt = flt(frm.doc.custom_kra_total_amount);
+            const kx = flt(frm.doc.custom_kra_tax_amount);
+
+            if (Math.abs(gt - kt) > tolerance) {
+                errors.push(
+                    __('Grand Total (base) {0} does not match KRA Total {1}.', [
+                        format_currency(gt, 'KES'),
+                        format_currency(kt, 'KES'),
+                    ])
+                );
+            }
+            if (Math.abs(tt - kx) > tolerance) {
+                errors.push(
+                    __('Total Taxes (base) {0} does not match KRA Tax {1}.', [
+                        format_currency(tt, 'KES'),
+                        format_currency(kx, 'KES'),
+                    ])
+                );
+            }
+        }
+
+        if (errors.length) {
+            frappe.throw({
+                title: __('KRA validation — cannot submit'),
+                message:
+                    __('This Purchase Invoice cannot be submitted until the following are resolved:') +
+                    '<br><br>• ' +
+                    errors.join('<br><br>• ') +
+                    '<br><br>' +
+                    __('You can still Save the invoice as a Draft.'),
+                indicator: 'red',
             });
         }
     },

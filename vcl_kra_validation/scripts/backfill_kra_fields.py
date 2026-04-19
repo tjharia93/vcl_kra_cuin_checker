@@ -31,6 +31,7 @@ PENDING_FILTERS = {
     "bill_no": ["is", "set"],
     "custom_kra_total_amount": ["is", "not set"],
     "docstatus": ["!=", 2],  # skip cancelled
+    "custom_purchase_invoice_type": "Local Purchase",  # KRA only covers local purchases
 }
 
 
