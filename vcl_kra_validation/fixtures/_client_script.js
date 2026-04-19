@@ -75,8 +75,8 @@ frappe.ui.form.on('Purchase Invoice', {
                         {
                             message: __('KRA: {0} — Tax {1}, Total {2}', [
                                 d.supplier_name,
-                                format_currency(d.tax_amt, frm.doc.currency || 'KES'),
-                                format_currency(d.total_inv_amt, frm.doc.currency || 'KES'),
+                                format_currency(d.tax_amt, 'KES'),
+                                format_currency(d.total_inv_amt, 'KES'),
                             ]),
                             indicator: 'green',
                         },
@@ -94,25 +94,28 @@ frappe.ui.form.on('Purchase Invoice', {
         const kra_tax = frm.doc.custom_kra_tax_amount;
         if (!kra_total && !kra_tax) return; // no KRA data loaded — nothing to compare
 
+        // KRA always reports in KES (base currency). Compare against the invoice's
+        // base-currency totals, not the transaction-currency totals, otherwise a
+        // USD-denominated PI with correct numbers flags as a mismatch.
         const tolerance = 1.0; // KES 1
         const diffs = [];
 
-        const gt = flt(frm.doc.grand_total);
-        const tt = flt(frm.doc.total_taxes_and_charges);
+        const gt = flt(frm.doc.base_grand_total);
+        const tt = flt(frm.doc.base_total_taxes_and_charges);
 
         if (Math.abs(gt - flt(kra_total)) > tolerance) {
             diffs.push(
-                __('Grand Total {0} does not match KRA Total {1}', [
-                    format_currency(gt, frm.doc.currency || 'KES'),
-                    format_currency(kra_total, frm.doc.currency || 'KES'),
+                __('Grand Total (base) {0} does not match KRA Total {1}', [
+                    format_currency(gt, 'KES'),
+                    format_currency(kra_total, 'KES'),
                 ])
             );
         }
         if (Math.abs(tt - flt(kra_tax)) > tolerance) {
             diffs.push(
-                __('Total Taxes {0} does not match KRA Tax {1}', [
-                    format_currency(tt, frm.doc.currency || 'KES'),
-                    format_currency(kra_tax, frm.doc.currency || 'KES'),
+                __('Total Taxes (base) {0} does not match KRA Tax {1}', [
+                    format_currency(tt, 'KES'),
+                    format_currency(kra_tax, 'KES'),
                 ])
             );
         }
@@ -144,25 +147,26 @@ frappe.ui.form.on('Purchase Invoice', {
                 )
             );
         } else {
+            // Compare against base-currency totals because KRA always reports KES.
             const tolerance = 1.0;
-            const gt = flt(frm.doc.grand_total);
-            const tt = flt(frm.doc.total_taxes_and_charges);
+            const gt = flt(frm.doc.base_grand_total);
+            const tt = flt(frm.doc.base_total_taxes_and_charges);
             const kt = flt(frm.doc.custom_kra_total_amount);
             const kx = flt(frm.doc.custom_kra_tax_amount);
 
             if (Math.abs(gt - kt) > tolerance) {
                 errors.push(
-                    __('Grand Total {0} does not match KRA Total {1}.', [
-                        format_currency(gt, frm.doc.currency || 'KES'),
-                        format_currency(kt, frm.doc.currency || 'KES'),
+                    __('Grand Total (base) {0} does not match KRA Total {1}.', [
+                        format_currency(gt, 'KES'),
+                        format_currency(kt, 'KES'),
                     ])
                 );
             }
             if (Math.abs(tt - kx) > tolerance) {
                 errors.push(
-                    __('Total Taxes {0} does not match KRA Tax {1}.', [
-                        format_currency(tt, frm.doc.currency || 'KES'),
-                        format_currency(kx, frm.doc.currency || 'KES'),
+                    __('Total Taxes (base) {0} does not match KRA Tax {1}.', [
+                        format_currency(tt, 'KES'),
+                        format_currency(kx, 'KES'),
                     ])
                 );
             }
