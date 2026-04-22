@@ -141,24 +141,46 @@ def _validate_etims(invoice_no: str) -> dict:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    try:
-        resp = requests.get(
-            ETIMS_URL,
-            params={"Data": data_param},
-            headers=headers,
-            timeout=20,
-        )
-    except requests.RequestException as e:
-        frappe.log_error(
-            title="KRA CUIN validate (eTIMS): network error",
-            message=f"invoice_no={invoice_no}\n{e}",
-        )
-        return {
-            "valid": False,
-            "invoice_no": invoice_no,
-            "error": f"KRA eTIMS unreachable: {str(e)[:200]}",
-            "source": "etims",
-        }
+    # eTIMS is noticeably slower than iTax (empirically 20-45s from Frappe
+    # Cloud). Use a split connect/read timeout so we fail fast when the host
+    # is unreachable but wait long enough for the receipt page to render.
+    # One retry on read-timeout covers transient slowness without doubling
+    # the best-case latency.
+    last_error = None
+    for attempt in (1, 2):
+        try:
+            resp = requests.get(
+                ETIMS_URL,
+                params={"Data": data_param},
+                headers=headers,
+                timeout=(10, 60),
+            )
+            break
+        except requests.exceptions.ReadTimeout as e:
+            last_error = e
+            if attempt == 1:
+                continue
+            frappe.log_error(
+                title="KRA CUIN validate (eTIMS): read timeout after retry",
+                message=f"invoice_no={invoice_no}\n{e}",
+            )
+            return {
+                "valid": False,
+                "invoice_no": invoice_no,
+                "error": "KRA eTIMS is responding slowly. The supplier's receipt exists on the portal but our request timed out. Please try again in a moment, or open the eTIMS link directly in your browser.",
+                "source": "etims",
+            }
+        except requests.RequestException as e:
+            frappe.log_error(
+                title="KRA CUIN validate (eTIMS): network error",
+                message=f"invoice_no={invoice_no}\n{e}",
+            )
+            return {
+                "valid": False,
+                "invoice_no": invoice_no,
+                "error": f"KRA eTIMS unreachable: {str(e)[:200]}",
+                "source": "etims",
+            }
 
     if resp.status_code != 200:
         return {
