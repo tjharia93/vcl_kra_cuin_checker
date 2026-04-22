@@ -1,7 +1,7 @@
 # VCL KRA Validation
 
-Custom Frappe app for Vimit Converters Limited that validates KRA eTIMS Control
-Unit Invoice Numbers (CUINs) against the public iTax invoice checker when a
+Custom Frappe app for Vimit Converters Limited that validates KRA Control Unit
+Invoice Numbers (CUINs) against the public iTax and eTIMS portals when a
 Purchase Invoice is being entered in ERPNext.
 
 ## What it does
@@ -31,13 +31,9 @@ On every Purchase Invoice form, when the user fills in the **Supplier Invoice No
 
 ## KRA endpoint notes
 
-- The iTax invoice checker is **public**: no login, no API key.
-- Cookies/session are **not** required. A single POST with the correct
-  `Referer` and `X-Requested-With` headers returns the JSON payload.
-- CUINs containing `/` (slash) are routed by KRA to the new eTIMS portal at
-  `https://etims.kra.go.ke/common/link/etims/receipt/indexEtimsInvoiceData?Data=...`;
-  those are **not** handled by this app — `validate_cuin` returns an error
-  with `error = "CUINs containing '/' are not supported..."`.
+- **iTax** (digit-only CUINs): `https://itax.kra.go.ke/KRA-Portal/middlewareController.htm?actionCode=fetchInvoiceDtl`. Public, no login, no API key; a single POST with `Referer` + `X-Requested-With` headers returns JSON.
+- **eTIMS** (slash-containing CUINs, e.g. `KRACU0100065004/379`): `https://etims.kra.go.ke/common/link/etims/receipt/indexEtimsInvoiceData?Data=<cuin-with-"/"-replaced-by-"-">`. Public HTML page; parsed server-side with regex. Credit notes return signed (negative) amounts which the client compares against the base-currency totals of return Purchase Invoices.
+- `validate_cuin` dispatches on CUIN shape: `/`-containing → eTIMS, otherwise → iTax. Both return the same response dict shape with an additional `source: "itax" | "etims"` key.
 
 ## Install on a Frappe Cloud bench
 
