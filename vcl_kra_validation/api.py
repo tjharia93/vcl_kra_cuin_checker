@@ -1,7 +1,14 @@
-"""Whitelisted endpoint that validates a KRA eTIMS CUIN via the public iTax checker.
+"""Whitelisted endpoint that validates a KRA CUIN via the public iTax or eTIMS
+portals, depending on CUIN shape.
 
 Called from the Purchase Invoice client script (see fixtures/client_script.json)
 as `vcl_kra_validation.api.validate_cuin`.
+
+Digit-only CUINs (e.g. ``0190438130000017933``) hit the iTax invoice checker,
+which returns JSON. Slash-containing CUINs (e.g. ``KRACU0100065004/379``) hit
+the newer eTIMS receipt portal, which returns HTML — parsed here with regex.
+Both paths return the same response dict shape so the client script does not
+need to know which portal served the data.
 """
 
 import frappe
@@ -27,15 +34,12 @@ def validate_cuin(invoice_no: str) -> dict:
     if not invoice_no:
         return {"valid": False, "error": "invoice_no is required"}
 
-    # KRA routes slash-containing CUIns to the new eTIMS portal flow which we
-    # don't handle here.
     if "/" in invoice_no:
-        return {
-            "valid": False,
-            "invoice_no": invoice_no,
-            "error": "CUINs containing '/' are not supported by this checker (eTIMS portal flow required).",
-        }
+        return _validate_etims(invoice_no)
+    return _validate_itax(invoice_no)
 
+
+def _validate_itax(invoice_no: str) -> dict:
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": ITAX_REFERER,
@@ -54,13 +58,14 @@ def validate_cuin(invoice_no: str) -> dict:
         )
     except requests.RequestException as e:
         frappe.log_error(
-            title="KRA CUIN validate: network error",
+            title="KRA CUIN validate (iTax): network error",
             message=f"invoice_no={invoice_no}\n{e}",
         )
         return {
             "valid": False,
             "invoice_no": invoice_no,
-            "error": f"KRA portal unreachable: {str(e)[:200]}",
+            "error": f"KRA iTax unreachable: {str(e)[:200]}",
+            "source": "itax",
         }
 
     try:
@@ -69,16 +74,18 @@ def validate_cuin(invoice_no: str) -> dict:
         return {
             "valid": False,
             "invoice_no": invoice_no,
-            "error": f"Non-JSON response from KRA (status {resp.status_code})",
+            "error": f"Non-JSON response from KRA iTax (status {resp.status_code})",
             "body_snippet": (resp.text or "")[:400],
+            "source": "itax",
         }
 
     if not isinstance(data, dict):
         return {
             "valid": False,
             "invoice_no": invoice_no,
-            "error": "Unexpected KRA response shape",
+            "error": "Unexpected KRA iTax response shape",
             "raw": data,
+            "source": "itax",
         }
 
     err = data.get("errorDTO") or {}
@@ -87,13 +94,15 @@ def validate_cuin(invoice_no: str) -> dict:
             "valid": False,
             "invoice_no": invoice_no,
             "error": err.get("msg"),
+            "source": "itax",
         }
 
     if not data.get("mwInvNo"):
         return {
             "valid": False,
             "invoice_no": invoice_no,
-            "error": "KRA returned no invoice data",
+            "error": "KRA iTax returned no invoice data",
+            "source": "itax",
         }
 
     buyer_pin = (data.get("buyerPIN") or "").strip().upper()
@@ -112,4 +121,16 @@ def validate_cuin(invoice_no: str) -> dict:
         "taxable_amt": data.get("taxableAmt"),
         "tax_amt": data.get("taxAmt"),
         "total_inv_amt": data.get("totalInvAmt"),
+        "source": "itax",
+        "is_credit_note": False,
+    }
+
+
+def _validate_etims(invoice_no: str) -> dict:
+    # eTIMS implementation follows in the next commit.
+    return {
+        "valid": False,
+        "invoice_no": invoice_no,
+        "error": "eTIMS support not yet implemented",
+        "source": "etims",
     }
