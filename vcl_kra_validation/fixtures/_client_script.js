@@ -154,37 +154,59 @@ function runKraValidation(frm, cuin) {
     });
 }
 
-frappe.ui.form.on('Purchase Invoice', {
-    custom_purchase_invoice_type(frm) {
-        if (!isLocalPurchase(frm)) {
-            clearKraFields(frm);
-            return;
-        }
-        if (frm.doc.bill_no) {
-            frm.trigger('bill_no');
-        }
-    },
-
-    bill_no(frm) {
-        // Frappe fires this on field commit (blur / Enter), not per keystroke.
-        // Fire validation immediately — the user has finished editing.
-        if (!isLocalPurchase(frm)) {
-            clearKraFields(frm);
-            _vclKraLastCuin = null;
-            return;
-        }
-
+// Attach a real DOM blur handler to the bill_no input. Frappe's own
+// bill_no(frm) handler fires on its internal debounced change — which can
+// trigger while the user is still typing. We want validation to fire ONLY
+// when focus actually leaves the field.
+function attachKraBlurHandler(frm) {
+    const field = frm.fields_dict && frm.fields_dict.bill_no;
+    if (!field || !field.$input) return;
+    field.$input.off('blur.vclKra').on('blur.vclKra', () => {
+        if (!isLocalPurchase(frm)) return;
         const cuin = (frm.doc.bill_no || '').trim();
         if (!cuin) {
             clearKraFields(frm);
             _vclKraLastCuin = null;
             return;
         }
-
-        // Skip duplicate calls when user tabs out and back in unchanged.
-        if (cuin === _vclKraLastCuin) return;
+        if (cuin === _vclKraLastCuin) return; // unchanged since last validation
         _vclKraLastCuin = cuin;
         runKraValidation(frm, cuin);
+    });
+}
+
+frappe.ui.form.on('Purchase Invoice', {
+    onload(frm) {
+        attachKraBlurHandler(frm);
+    },
+
+    refresh(frm) {
+        // Re-attach in case the input element was re-rendered by Frappe.
+        attachKraBlurHandler(frm);
+    },
+
+    custom_purchase_invoice_type(frm) {
+        if (!isLocalPurchase(frm)) {
+            clearKraFields(frm);
+            _vclKraLastCuin = null;
+            return;
+        }
+        attachKraBlurHandler(frm);
+        const cuin = (frm.doc.bill_no || '').trim();
+        if (cuin && cuin !== _vclKraLastCuin) {
+            _vclKraLastCuin = cuin;
+            runKraValidation(frm, cuin);
+        }
+    },
+
+    bill_no(frm) {
+        // Validation runs on real input blur (see attachKraBlurHandler).
+        // This Frappe-level handler only handles the clear case — when the
+        // user empties the field, drop the KRA-loaded fields immediately.
+        if (!(frm.doc.bill_no || '').trim()) {
+            clearKraFields(frm);
+            _vclKraLastCuin = null;
+        }
     },
 
     validate(frm) {
