@@ -26,6 +26,24 @@ function isKraExempt(frm) {
     return Boolean(frm.doc.custom_kra_cuin_exempt);
 }
 
+// KRA portal/iTax outage signatures returned by the server API. When KRA
+// itself is broken (HTML served instead of JSON, network timeout, slow
+// responses) we soft-fail: mark the invoice as pending verification, let
+// it submit, and re-check at end of day via the scheduled job.
+const VCL_KRA_DOWN_PATTERNS = [
+    /Non-JSON response from KRA/i,
+    /KRA portal unreachable/i,
+    /KRA eTIMS portal unreachable/i,
+    /responding slowly/i,
+    /Read timed out/i,
+    /Connection refused/i,
+];
+
+function isKraDownError(errorMsg) {
+    if (!errorMsg) return false;
+    return VCL_KRA_DOWN_PATTERNS.some((re) => re.test(errorMsg));
+}
+
 function clearKraFields(frm) {
     VCL_KRA_FIELDS.forEach((f) => frm.set_value(f, null));
 }
@@ -103,6 +121,22 @@ function runKraValidation(frm, cuin) {
         callback(r) {
             const d = r.message || {};
             if (!d.valid) {
+                // Distinguish "KRA is currently down" from "CUIN truly invalid".
+                if (isKraDownError(d.error)) {
+                    // Soft-fail: mark the invoice as pending verification and
+                    // let the user submit. The daily scheduled job will retry.
+                    frm.set_value('custom_kra_pending_verification', 1);
+                    frappe.msgprint({
+                        title: __('KRA iTax is currently unavailable'),
+                        message:
+                            '<p>' + __('KRA could not be reached to validate <b>{0}</b> right now. This is on KRA\'s side, not yours.', [cuin]) + '</p>' +
+                            '<p><b>' + __('KRA response:') + '</b> ' + frappe.utils.escape_html(d.error || '') + '</p>' +
+                            '<p>' + __('This invoice has been flagged as <b>KRA pending verification</b>. You can save and submit normally — the daily verification job will re-check this CUIN at end of day and email the result to purchasing@vimit.com.') + '</p>',
+                        indicator: 'orange',
+                    });
+                    return;
+                }
+                // Genuine "CUIN not found" — keep the hard block.
                 clearKraFields(frm);
                 const source = (d.source || 'itax') === 'etims' ? 'eTIMS' : 'iTax';
                 frappe.msgprint({
@@ -124,6 +158,10 @@ function runKraValidation(frm, cuin) {
                     indicator: 'red',
                 });
                 return;
+            }
+            // Valid response from KRA — clear pending flag if it was set.
+            if (frm.doc.custom_kra_pending_verification) {
+                frm.set_value('custom_kra_pending_verification', 0);
             }
             frm.set_value('custom_kra_supplier_name', d.supplier_name || '');
             frm.set_value('custom_kra_invoice_number', d.trader_system_inv_no || '');
@@ -219,6 +257,7 @@ frappe.ui.form.on('Purchase Invoice', {
 
     validate(frm) {
         if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+        if (frm.doc.custom_kra_pending_verification) return; // EOD job will re-verify
 
         const kra_tax = flt(frm.doc.custom_kra_tax_amount);
         const kra_total = flt(frm.doc.custom_kra_total_amount);
@@ -256,6 +295,11 @@ frappe.ui.form.on('Purchase Invoice', {
 
     before_submit(frm) {
         if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+
+        // Soft-fail path: KRA was unreachable at entry time, so the invoice
+        // has been marked pending verification. Allow submit — the daily job
+        // will re-verify and report to purchasing@vimit.com.
+        if (frm.doc.custom_kra_pending_verification) return;
 
         // Case A — bill_no missing entirely
         if (!frm.doc.bill_no) {
