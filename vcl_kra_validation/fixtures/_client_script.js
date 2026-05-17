@@ -19,6 +19,13 @@ function isLocalPurchase(frm) {
     return (frm.doc.custom_purchase_invoice_type || '').trim() === VCL_KRA_TYPE;
 }
 
+// Mirrored from Supplier.custom_kra_cuin_exempt via fetch_from. When set,
+// the supplier issues invoices outside the KRA eTIMS regime (e.g. Safaricom,
+// EASY WATER SERVICES, insurance brokers) so all KRA validation is skipped.
+function isKraExempt(frm) {
+    return Boolean(frm.doc.custom_kra_cuin_exempt);
+}
+
 function clearKraFields(frm) {
     VCL_KRA_FIELDS.forEach((f) => frm.set_value(f, null));
 }
@@ -162,7 +169,7 @@ function attachKraBlurHandler(frm) {
     const field = frm.fields_dict && frm.fields_dict.bill_no;
     if (!field || !field.$input) return;
     field.$input.off('blur.vclKra').on('blur.vclKra', () => {
-        if (!isLocalPurchase(frm)) return;
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
         const cuin = (frm.doc.bill_no || '').trim();
         if (!cuin) {
             clearKraFields(frm);
@@ -192,6 +199,7 @@ frappe.ui.form.on('Purchase Invoice', {
             return;
         }
         attachKraBlurHandler(frm);
+        if (isKraExempt(frm)) return; // supplier flagged exempt — skip
         const cuin = (frm.doc.bill_no || '').trim();
         if (cuin && cuin !== _vclKraLastCuin) {
             _vclKraLastCuin = cuin;
@@ -210,7 +218,7 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     validate(frm) {
-        if (!isLocalPurchase(frm)) return;
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
 
         const kra_tax = flt(frm.doc.custom_kra_tax_amount);
         const kra_total = flt(frm.doc.custom_kra_total_amount);
@@ -247,7 +255,7 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     before_submit(frm) {
-        if (!isLocalPurchase(frm)) return;
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
 
         // Case A — bill_no missing entirely
         if (!frm.doc.bill_no) {
