@@ -18,3 +18,12 @@ fixtures = [
         "filters": [["name", "=", "VCL KRA CUIN Validation"]],
     },
 ]
+
+# Daily verification job — re-runs validate_cuin against every Local Purchase
+# invoice posted that day (plus any older ones still flagged pending) and
+# emails the result to purchasing@vimit.com. 19:00 EAT = 16:00 UTC.
+scheduler_events = {
+    "cron": {
+        "0 16 * * *": ["vcl_kra_validation.scheduled_tasks.daily_verify_kra_invoices"],
+    },
+}
