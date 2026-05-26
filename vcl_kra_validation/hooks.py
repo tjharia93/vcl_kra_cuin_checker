@@ -19,7 +19,7 @@ fixtures = [
     },
     {
         "dt": "Client Script",
-        "filters": [["name", "=", "VCL KRA CUIN Validation"]],
+        "filters": [["name", "like", "VCL KRA CUIN Validation%"]],
     },
 ]
 
