@@ -27,9 +27,19 @@ const VCL_KRA_SI_TOLERANCE = 1.0; // KES 1
 let _vclKraSiLastCuin = null;
 
 function siIsKraScope(frm) {
-    // Only Domestic VAT SIs are in eTIMS scope. Export / zero-rated SIs are
-    // out of scope and we skip validation entirely.
-    return (frm.doc.tax_category || '').trim() === 'Domestic VAT';
+    // In eTIMS scope if the invoice carries any VAT. We check three signals
+    // because legacy SIs in VCL's data are inconsistent:
+    //   1. tax_category = 'Domestic VAT' (the canonical flag), OR
+    //   2. taxes_and_charges template name contains 'Domestic VAT' (older SIs
+    //      that have the template but never set the category field), OR
+    //   3. there is at least one VAT tax row on the invoice (catches manual
+    //      tax row entries that bypass the template).
+    // Export / zero-rated SIs satisfy none of these and are correctly skipped.
+    const cat = (frm.doc.tax_category || '').trim();
+    if (cat === 'Domestic VAT') return true;
+    const tpl = (frm.doc.taxes_and_charges || '').toLowerCase();
+    if (tpl.includes('domestic vat')) return true;
+    return siErpVatTotal(frm) > 0;
 }
 
 function siIsKraExempt(frm) {
@@ -114,7 +124,15 @@ function runSiKraValidation(frm, cuin) {
             // ---- Advisory checks ----
             const warnings = [];
 
-            if (!d.is_vcl_supplier) {
+            // is_vcl_supplier is true when KRA's supplier_pin matches VCL.
+            // Older iTax receipts sometimes return an EMPTY supplier_pin even
+            // though the supplier_name field reads 'VIMIT CONVERTERS LIMITED'
+            // — so we fall back to a name match before raising the warning.
+            const supplierLooksLikeVcl =
+                d.is_vcl_supplier ||
+                /vimit\s*converters/i.test(d.supplier_name || '');
+
+            if (!supplierLooksLikeVcl) {
                 warnings.push(
                     __(
                         'KRA shows the supplier on this CUIN as <b>{0}</b> (PIN <code>{1}</code>), not Vimit Converters Limited (PIN <code>{2}</code>). This CUIN does not belong to VCL.',
@@ -209,6 +227,24 @@ frappe.ui.form.on('Sales Invoice', {
     refresh(frm) {
         // Re-attach in case the input was re-rendered.
         attachSiKraBlurHandler(frm);
+
+        // Auto-validate on form load. If the SI is in eTIMS scope, has a
+        // CUIN, and the KRA fields haven't been populated yet (older drafts
+        // created before this script existed, or KRA was down at entry
+        // time), fire validation once. Skip if we've already validated
+        // this CUIN in this session or the fields already hold KRA data.
+        const cuin = (frm.doc.custom_cuin || '').trim();
+        if (!cuin) return;
+        if (!siIsKraScope(frm) || siIsKraExempt(frm)) return;
+        if (cuin === _vclKraSiLastCuin) return;
+        if (flt(frm.doc.custom_kra_total_amount) > 0) {
+            // Already validated previously and persisted — remember the
+            // CUIN so the blur handler doesn't re-fire unnecessarily.
+            _vclKraSiLastCuin = cuin;
+            return;
+        }
+        _vclKraSiLastCuin = cuin;
+        runSiKraValidation(frm, cuin);
     },
 
     custom_cuin(frm) {
