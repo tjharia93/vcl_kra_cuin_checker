@@ -246,13 +246,23 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     bill_no(frm) {
-        // Validation runs on real input blur (see attachKraBlurHandler).
-        // This Frappe-level handler only handles the clear case — when the
-        // user empties the field, drop the KRA-loaded fields immediately.
-        if (!(frm.doc.bill_no || '').trim()) {
+        // The DOM blur handler (attachKraBlurHandler) covers the typing flow,
+        // but it does not fire when the user pastes a CUIN and clicks Save
+        // without ever blurring the field. This Frappe-level handler is the
+        // safety net for that path: it fires whenever bill_no commits
+        // (programmatic set_value, paste followed by another field commit,
+        // or Frappe's internal change cycle). Dedup via _vclKraLastCuin
+        // keeps the blur handler from double-firing.
+        const cuin = (frm.doc.bill_no || '').trim();
+        if (!cuin) {
             clearKraFields(frm);
             _vclKraLastCuin = null;
+            return;
         }
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+        if (cuin === _vclKraLastCuin) return;
+        _vclKraLastCuin = cuin;
+        runKraValidation(frm, cuin);
     },
 
     validate(frm) {
