@@ -10,16 +10,38 @@ const VCL_KRA_FIELDS = [
     'custom_kra_total_amount',
 ];
 const VCL_KRA_TOLERANCE = 1.0; // KES 1
-const VCL_KRA_DEBOUNCE_MS = 1500; // wait for user to finish entering CUIN
 
-// Module-level debounce state. We debounce the KRA fetch so that a user who
-// tabs in and out of the field during partial entry, or pastes + blurs in
-// quick succession, only triggers one network call.
-let _vclKraTimer = null;
+// Last CUIN we successfully sent to KRA. Used to skip duplicate calls when
+// the user tabs out of bill_no and back in without changing the value.
 let _vclKraLastCuin = null;
 
 function isLocalPurchase(frm) {
     return (frm.doc.custom_purchase_invoice_type || '').trim() === VCL_KRA_TYPE;
+}
+
+// Mirrored from Supplier.custom_kra_cuin_exempt via fetch_from. When set,
+// the supplier issues invoices outside the KRA eTIMS regime (e.g. Safaricom,
+// EASY WATER SERVICES, insurance brokers) so all KRA validation is skipped.
+function isKraExempt(frm) {
+    return Boolean(frm.doc.custom_kra_cuin_exempt);
+}
+
+// KRA portal/iTax outage signatures returned by the server API. When KRA
+// itself is broken (HTML served instead of JSON, network timeout, slow
+// responses) we soft-fail: mark the invoice as pending verification, let
+// it submit, and re-check at end of day via the scheduled job.
+const VCL_KRA_DOWN_PATTERNS = [
+    /Non-JSON response from KRA/i,
+    /KRA portal unreachable/i,
+    /KRA eTIMS portal unreachable/i,
+    /responding slowly/i,
+    /Read timed out/i,
+    /Connection refused/i,
+];
+
+function isKraDownError(errorMsg) {
+    if (!errorMsg) return false;
+    return VCL_KRA_DOWN_PATTERNS.some((re) => re.test(errorMsg));
 }
 
 function clearKraFields(frm) {
@@ -28,6 +50,23 @@ function clearKraFields(frm) {
 
 function fmtKes(value) {
     return format_currency(flt(value), 'KES');
+}
+
+// Sum of VAT tax rows (account head contains "VAT", case-insensitive).
+// Excludes non-VAT levies like ERC, WARMA, REP that vendors such as KPLC
+// charge alongside VAT-rated supply.
+function erpVatTotal(frm) {
+    return (frm.doc.taxes || []).reduce((sum, row) => {
+        const acc = (row.account_head || '').toLowerCase();
+        return acc.includes('vat') ? sum + flt(row.base_tax_amount) : sum;
+    }, 0);
+}
+
+// Returns -1 for Debit Notes / Credit Notes (is_return = 1), else 1. KRA
+// reports the absolute invoice value; ERPNext returns are negative. Multiply
+// KRA values by this before comparing or displaying so signs line up.
+function kraSign(frm) {
+    return frm.doc.is_return ? -1 : 1;
 }
 
 function comparisonTable(rows) {
@@ -82,6 +121,22 @@ function runKraValidation(frm, cuin) {
         callback(r) {
             const d = r.message || {};
             if (!d.valid) {
+                // Distinguish "KRA is currently down" from "CUIN truly invalid".
+                if (isKraDownError(d.error)) {
+                    // Soft-fail: mark the invoice as pending verification and
+                    // let the user submit. The daily scheduled job will retry.
+                    frm.set_value('custom_kra_pending_verification', 1);
+                    frappe.msgprint({
+                        title: __('KRA iTax is currently unavailable'),
+                        message:
+                            '<p>' + __('KRA could not be reached to validate <b>{0}</b> right now. This is on KRA\'s side, not yours.', [cuin]) + '</p>' +
+                            '<p><b>' + __('KRA response:') + '</b> ' + frappe.utils.escape_html(d.error || '') + '</p>' +
+                            '<p>' + __('This invoice has been flagged as <b>KRA pending verification</b>. You can save and submit normally — the daily verification job will re-check this CUIN at end of day and email the result to purchasing@vimit.com.') + '</p>',
+                        indicator: 'orange',
+                    });
+                    return;
+                }
+                // Genuine "CUIN not found" — keep the hard block.
                 clearKraFields(frm);
                 const source = (d.source || 'itax') === 'etims' ? 'eTIMS' : 'iTax';
                 frappe.msgprint({
@@ -103,6 +158,10 @@ function runKraValidation(frm, cuin) {
                     indicator: 'red',
                 });
                 return;
+            }
+            // Valid response from KRA — clear pending flag if it was set.
+            if (frm.doc.custom_kra_pending_verification) {
+                frm.set_value('custom_kra_pending_verification', 0);
             }
             frm.set_value('custom_kra_supplier_name', d.supplier_name || '');
             frm.set_value('custom_kra_invoice_number', d.trader_system_inv_no || '');
@@ -140,75 +199,107 @@ function runKraValidation(frm, cuin) {
     });
 }
 
+// Attach a real DOM blur handler to the bill_no input. Frappe's own
+// bill_no(frm) handler fires on its internal debounced change — which can
+// trigger while the user is still typing. We want validation to fire ONLY
+// when focus actually leaves the field.
+function attachKraBlurHandler(frm) {
+    const field = frm.fields_dict && frm.fields_dict.bill_no;
+    if (!field || !field.$input) return;
+    field.$input.off('blur.vclKra').on('blur.vclKra', () => {
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+        const cuin = (frm.doc.bill_no || '').trim();
+        if (!cuin) {
+            clearKraFields(frm);
+            _vclKraLastCuin = null;
+            return;
+        }
+        if (cuin === _vclKraLastCuin) return; // unchanged since last validation
+        _vclKraLastCuin = cuin;
+        runKraValidation(frm, cuin);
+    });
+}
+
 frappe.ui.form.on('Purchase Invoice', {
+    onload(frm) {
+        attachKraBlurHandler(frm);
+    },
+
+    refresh(frm) {
+        // Re-attach in case the input element was re-rendered by Frappe.
+        attachKraBlurHandler(frm);
+    },
+
     custom_purchase_invoice_type(frm) {
         if (!isLocalPurchase(frm)) {
             clearKraFields(frm);
+            _vclKraLastCuin = null;
             return;
         }
-        if (frm.doc.bill_no) {
-            frm.trigger('bill_no');
+        attachKraBlurHandler(frm);
+        if (isKraExempt(frm)) return; // supplier flagged exempt — skip
+        const cuin = (frm.doc.bill_no || '').trim();
+        if (cuin && cuin !== _vclKraLastCuin) {
+            _vclKraLastCuin = cuin;
+            runKraValidation(frm, cuin);
         }
     },
 
     bill_no(frm) {
-        // Cancel any pending validation so the user can keep editing.
-        if (_vclKraTimer) {
-            clearTimeout(_vclKraTimer);
-            _vclKraTimer = null;
-        }
-
-        if (!isLocalPurchase(frm)) {
+        // Validation runs on real input blur (see attachKraBlurHandler).
+        // This Frappe-level handler only handles the clear case — when the
+        // user empties the field, drop the KRA-loaded fields immediately.
+        if (!(frm.doc.bill_no || '').trim()) {
             clearKraFields(frm);
-            return;
+            _vclKraLastCuin = null;
         }
-
-        const cuin = (frm.doc.bill_no || '').trim();
-        if (!cuin) {
-            clearKraFields(frm);
-            return;
-        }
-
-        _vclKraLastCuin = cuin;
-        _vclKraTimer = setTimeout(() => {
-            _vclKraTimer = null;
-            // If the user has changed the CUIN since we were scheduled, skip
-            // this stale fire — a newer invocation will take over.
-            if ((frm.doc.bill_no || '').trim() !== _vclKraLastCuin) return;
-            runKraValidation(frm, cuin);
-        }, VCL_KRA_DEBOUNCE_MS);
     },
 
     validate(frm) {
-        if (!isLocalPurchase(frm)) return;
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+        if (frm.doc.custom_kra_pending_verification) return; // EOD job will re-verify
 
-        const kra_total = frm.doc.custom_kra_total_amount;
-        const kra_tax = frm.doc.custom_kra_tax_amount;
+        const kra_tax = flt(frm.doc.custom_kra_tax_amount);
+        const kra_total = flt(frm.doc.custom_kra_total_amount);
         if (!kra_total && !kra_tax) return; // no KRA data loaded — nothing to compare
 
-        const gt = flt(frm.doc.base_grand_total);
-        const tt = flt(frm.doc.base_total_taxes_and_charges);
-        const totalsMismatch = Math.abs(gt - flt(kra_total)) > VCL_KRA_TOLERANCE;
-        const taxesMismatch = Math.abs(tt - flt(kra_tax)) > VCL_KRA_TOLERANCE;
+        const sign = kraSign(frm);
+        const kra_tax_signed = sign * kra_tax;
+        const kra_total_signed = sign * kra_total;
+        const erp_vat = erpVatTotal(frm);
+        const erp_gt = flt(frm.doc.base_grand_total);
 
-        if (!totalsMismatch && !taxesMismatch) return;
+        if (Math.abs(erp_vat - kra_tax_signed) <= VCL_KRA_TOLERANCE) return; // VAT matches — non-VAT items are not validated
+
+        const non_vat_diff = erp_gt - kra_total_signed;
+        const non_vat_note =
+            Math.abs(non_vat_diff) > VCL_KRA_TOLERANCE
+                ? '<p style="margin-top:8px; color:#666;"><i>' +
+                  __('Non-VAT items in ERPNext (e.g. exempt levies, fuel adjustments): {0}. These are outside KRA scope and are not compared.', [fmtKes(non_vat_diff)]) +
+                  '</i></p>'
+                : '';
 
         frappe.msgprint({
-            title: __('KRA totals need review'),
+            title: __('KRA VAT does not match — needs review'),
             message:
-                '<p>' + __('The Purchase Invoice totals do not match KRA for this CUIN. <b>This invoice needs to be reviewed before it can be submitted.</b>') + '</p>' +
+                '<p>' + __('The VAT on this Purchase Invoice does not match KRA for this CUIN. <b>This needs to be reviewed before submission.</b>') + '</p>' +
                 comparisonTable([
-                    [__('Grand Total'), gt, kra_total],
-                    [__('Total Taxes'), tt, kra_tax],
+                    [__('VAT'), erp_vat, kra_tax_signed],
                 ]) +
+                non_vat_note +
                 reviewChecklist() +
-                '<p style="margin-top:8px;"><i>' + __('You can save the invoice as a Draft now and continue the review later. Submit will remain blocked until the totals match (within KES {0}) or the supplier provides a corrected CUIN.', [VCL_KRA_TOLERANCE.toFixed(2)]) + '</i></p>',
+                '<p style="margin-top:8px;"><i>' + __('You can save the invoice as a Draft now and continue the review later. Submit will remain blocked until the VAT matches (within KES {0}).', [VCL_KRA_TOLERANCE.toFixed(2)]) + '</i></p>',
             indicator: 'orange',
         });
     },
 
     before_submit(frm) {
-        if (!isLocalPurchase(frm)) return;
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+
+        // Soft-fail path: KRA was unreachable at entry time, so the invoice
+        // has been marked pending verification. Allow submit — the daily job
+        // will re-verify and report to purchasing@vimit.com.
+        if (frm.doc.custom_kra_pending_verification) return;
 
         // Case A — bill_no missing entirely
         if (!frm.doc.bill_no) {
@@ -240,26 +331,33 @@ frappe.ui.form.on('Purchase Invoice', {
             return;
         }
 
-        // Case C — KRA fields populated; check totals match (in KES base)
-        const gt = flt(frm.doc.base_grand_total);
-        const tt = flt(frm.doc.base_total_taxes_and_charges);
-        const kt = flt(frm.doc.custom_kra_total_amount);
-        const kx = flt(frm.doc.custom_kra_tax_amount);
-        const totalsMismatch = Math.abs(gt - kt) > VCL_KRA_TOLERANCE;
-        const taxesMismatch = Math.abs(tt - kx) > VCL_KRA_TOLERANCE;
+        // Case C — KRA fields populated; check VAT matches (in KES base, signed for returns)
+        const sign = kraSign(frm);
+        const kra_tax_signed = sign * flt(frm.doc.custom_kra_tax_amount);
+        const kra_total_signed = sign * flt(frm.doc.custom_kra_total_amount);
+        const erp_vat = erpVatTotal(frm);
+        const erp_gt = flt(frm.doc.base_grand_total);
 
-        if (!totalsMismatch && !taxesMismatch) return; // all good — allow submit
+        if (Math.abs(erp_vat - kra_tax_signed) <= VCL_KRA_TOLERANCE) return; // VAT matches — allow submit
+
+        const non_vat_diff = erp_gt - kra_total_signed;
+        const non_vat_note =
+            Math.abs(non_vat_diff) > VCL_KRA_TOLERANCE
+                ? '<p style="margin-top:8px; color:#666;"><i>' +
+                  __('Non-VAT items in ERPNext (e.g. exempt levies, fuel adjustments): {0}. These are outside KRA scope and are not compared.', [fmtKes(non_vat_diff)]) +
+                  '</i></p>'
+                : '';
 
         frappe.throw({
-            title: __('Cannot submit — totals do not match KRA'),
+            title: __('Cannot submit — VAT does not match KRA'),
             message:
-                '<p>' + __('This Purchase Invoice does not match KRA and <b>needs to be reviewed</b> before it can be submitted.') + '</p>' +
+                '<p>' + __('The VAT on this Purchase Invoice does not match KRA and <b>needs to be reviewed</b> before it can be submitted.') + '</p>' +
                 comparisonTable([
-                    [__('Grand Total'), gt, kt],
-                    [__('Total Taxes'), tt, kx],
+                    [__('VAT'), erp_vat, kra_tax_signed],
                 ]) +
+                non_vat_note +
                 reviewChecklist() +
-                '<p style="margin-top:8px;"><i>' + __('Save as a Draft to keep your work; submit once the differences are resolved or the supplier confirms the figures.') + '</i></p>',
+                '<p style="margin-top:8px;"><i>' + __('Save as a Draft to keep your work; submit once the VAT matches or the supplier confirms the figures.') + '</i></p>',
             indicator: 'red',
         });
     },

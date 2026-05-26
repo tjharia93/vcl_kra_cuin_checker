@@ -110,10 +110,13 @@ def _validate_itax(invoice_no: str) -> dict:
         }
 
     buyer_pin = (data.get("buyerPIN") or "").strip().upper()
+    supplier_pin = (data.get("supplierPIN") or "").strip().upper()
     return {
         "valid": True,
         "invoice_no": invoice_no,
         "supplier_name": data.get("supplierName"),
+        "supplier_pin": supplier_pin,
+        "is_vcl_supplier": supplier_pin == VCL_KRA_PIN,
         "buyer_name": data.get("buyerName"),
         "buyer_pin": buyer_pin,
         "is_vcl_buyer": buyer_pin == VCL_KRA_PIN,
@@ -302,6 +305,7 @@ def _parse_etims_html(body: str, invoice_no: str) -> dict:
     }
     buyer_pin = (labels.get("CLIENT PIN") or "").strip().upper()
     buyer_name = labels.get("CLIENT NAME")
+    supplier_pin = (labels.get("PIN") or "").strip().upper()
 
     midtit_match = _PATTERN_MIDTIT.search(body)
     inv_type = html.unescape(midtit_match.group(1)).strip().upper() if midtit_match else None
@@ -364,6 +368,8 @@ def _parse_etims_html(body: str, invoice_no: str) -> dict:
         "valid": True,
         "invoice_no": invoice_no,
         "supplier_name": supplier_name,
+        "supplier_pin": supplier_pin,
+        "is_vcl_supplier": supplier_pin == VCL_KRA_PIN,
         "buyer_name": buyer_name,
         "buyer_pin": buyer_pin,
         "is_vcl_buyer": buyer_pin == VCL_KRA_PIN,

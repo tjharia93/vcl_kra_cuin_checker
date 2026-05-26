@@ -1,8 +1,19 @@
 # VCL KRA Validation
 
 Custom Frappe app for Vimit Converters Limited that validates KRA Control Unit
-Invoice Numbers (CUINs) against the public iTax and eTIMS portals when a
-Purchase Invoice is being entered in ERPNext.
+Invoice Numbers (CUINs) against the public iTax and eTIMS portals.
+
+Two validation paths:
+
+- **Per-invoice (Purchase Invoice form)** — runs in the browser as `bill_no` is
+  entered; surfaces red/orange banners for buyer-PIN and VAT mismatches before
+  the user saves.
+- **End-of-day sweep (Purchase + Sales Invoices)** — a 16:00 EAT scheduled job
+  (`daily_verify_kra_invoices`) re-validates every Local Purchase invoice and
+  every Domestic VAT Sales Invoice posted that day, catches issues that
+  occurred while KRA was unreachable or where the Sales Invoice was posted via
+  API without going through the client script, and emails a single
+  consolidated report to `purchasing@vimit.com`.
 
 ## What it does
 
