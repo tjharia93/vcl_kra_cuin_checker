@@ -1,2 +1,4 @@
+[pre_model_sync]
+
 [post_model_sync]
 vcl_kra_validation.patches.retire_si_form_checker
