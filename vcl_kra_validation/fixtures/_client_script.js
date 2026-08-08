@@ -246,13 +246,23 @@ frappe.ui.form.on('Purchase Invoice', {
     },
 
     bill_no(frm) {
-        // Validation runs on real input blur (see attachKraBlurHandler).
-        // This Frappe-level handler only handles the clear case — when the
-        // user empties the field, drop the KRA-loaded fields immediately.
-        if (!(frm.doc.bill_no || '').trim()) {
+        // The DOM blur handler (attachKraBlurHandler) covers the typing flow,
+        // but it does not fire when the user pastes a CUIN and clicks Save
+        // without ever blurring the field. This Frappe-level handler is the
+        // safety net for that path: it fires whenever bill_no commits
+        // (programmatic set_value, paste followed by another field commit,
+        // or Frappe's internal change cycle). Dedup via _vclKraLastCuin
+        // keeps the blur handler from double-firing.
+        const cuin = (frm.doc.bill_no || '').trim();
+        if (!cuin) {
             clearKraFields(frm);
             _vclKraLastCuin = null;
+            return;
         }
+        if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
+        if (cuin === _vclKraLastCuin) return;
+        _vclKraLastCuin = cuin;
+        runKraValidation(frm, cuin);
     },
 
     validate(frm) {
@@ -325,8 +335,16 @@ frappe.ui.form.on('Purchase Invoice', {
                     '<li>' + __('Try the CUIN directly on <a href="https://itax.kra.go.ke/KRA-Portal/invoiceNumberChecker.htm" target="_blank">KRA iTax</a> (slashes redirect to eTIMS). If KRA also says "not found", the eTIMS record does not exist.') + '</li>' +
                     '<li>' + __('<b>Contact the supplier</b> — the eTIMS invoice may have been cancelled, never transmitted, or re-issued. Request the latest valid CUIN.') + '</li>' +
                     '</ol>' +
-                    '<p style="margin-top:8px;"><i>' + __('You can keep this invoice as a Draft while you investigate.') + '</i></p>',
+                    '<p style="margin-top:8px;"><i>' + __('You can keep this invoice as a Draft while you investigate \u2014 or, if you have checked and cannot resolve the CUIN now, use <b>Submit as KRA pending</b> below to submit it anyway and add it to the KRA pending-verification queue for follow-up.') + '</i></p>',
                 indicator: 'red',
+                primary_action: {
+                    label: __('Submit as KRA pending'),
+                    action() {
+                        try { if (frappe.msg_dialog) frappe.msg_dialog.hide(); } catch (e) {}
+                        frm.set_value('custom_kra_pending_verification', 1);
+                        frm.save('Submit').catch(() => {});
+                    },
+                },
             });
             return;
         }

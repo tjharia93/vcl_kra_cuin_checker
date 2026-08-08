@@ -325,14 +325,18 @@ def _parse_etims_html(body: str, invoice_no: str) -> dict:
 
     total_inv_amt = totals.get("TOTAL")
     tax_amt = totals.get("TOTAL TAX")
-    # Taxable = sum of the rated amounts (exclude the plain TOTAL row and the
-    # per-band tax rows). In practice the "TOTAL AMOUNT *" rows already net
-    # to taxable amount; if KRA renames these labels we silently skip.
+
+    # Taxable (net) amount. The "TOTAL AMOUNT <band>" rows are NOT net — they
+    # are the VAT-INCLUSIVE turnover in each band, which is why they sum to
+    # the same figure as "TOTAL". Verified against the live receipt for
+    # KRACU0100065004/379 on 2026-08-08: TOTAL AMOUNT B-16% = 43,664.72,
+    # TOTAL TAX-B-16% = 6,022.72, and 43,664.72 / 1.16 = 37,642.00 =
+    # 43,664.72 - 6,022.72. So net is always gross minus tax.
+    #
+    # (This used to return the summed band amounts as `taxable_amt`, which
+    # overstated the net by exactly the VAT.)
     taxable_amt = None
-    rated_amounts = [v for k, v in totals.items() if k.startswith("TOTAL AMOUNT ")]
-    if rated_amounts:
-        taxable_amt = sum(rated_amounts)
-    elif total_inv_amt is not None and tax_amt is not None:
+    if total_inv_amt is not None and tax_amt is not None:
         taxable_amt = total_inv_amt - tax_amt
 
     # SCU information — look for Date, Control Unit Number, Internal Data.
@@ -385,3 +389,24 @@ def _parse_etims_html(body: str, invoice_no: str) -> dict:
         "is_credit_note": is_credit_note,
         "control_unit_number": control_unit_number,
     }
+
+
+@frappe.whitelist()
+def recheck_sales_invoice(name: str) -> dict:
+    """Re-check one submitted Sales Invoice against KRA, on demand.
+
+    Backs the "Recheck KRA now" button that replaced the old on-form checker.
+    The nightly sweep is the system of record; this is the same code path,
+    triggered by a human who does not want to wait for 19:00.
+
+    Imported lazily: ``scheduled_tasks`` imports ``validate_cuin`` from this
+    module, so a module-level import here would be circular.
+    """
+    from vcl_kra_validation.scheduled_tasks import verify_sales_invoice
+
+    if not frappe.has_permission("Sales Invoice", "read", doc=name):
+        frappe.throw("Not permitted", frappe.PermissionError)
+
+    result = verify_sales_invoice(name)
+    frappe.db.commit()
+    return result

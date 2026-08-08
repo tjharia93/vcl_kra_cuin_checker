@@ -19,12 +19,16 @@ fixtures = [
     },
     {
         "dt": "Client Script",
-        "filters": [["name", "=", "VCL KRA CUIN Validation"]],
+        "filters": [["name", "like", "VCL KRA%"]],
     },
 ]
 
-# Daily verification job — re-runs validate_cuin against every Local Purchase
-# invoice posted that day (plus any older ones still flagged pending) and
+after_install = "vcl_kra_validation.install.after_install"
+
+# Daily verification job. The ONLY place invoices are checked against KRA —
+# there is no on-form checker on Sales Invoice (see patches/retire_si_form_checker).
+# Covers Local Purchase invoices posted that day, and every submitted VCL Sales
+# Invoice carrying a CUIN that has not been verified since it last changed;
 # emails the result to purchasing@vimit.com. 19:00 EAT = 16:00 UTC.
 scheduler_events = {
     "cron": {
