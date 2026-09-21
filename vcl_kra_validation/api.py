@@ -57,8 +57,9 @@ def _validate_itax(invoice_no: str) -> dict:
     # (London) when it answers at all — but like eTIMS it silently drops
     # requests in bad windows. On 21/09/2026 it dropped a run of them between
     # 09:41 and 11:25, every one of which the old flat 20s-no-retry shape
-    # turned into a "KRA pending" invoice. There were 59 such invoices, and
-    # the CUINs on the ones sampled all resolve perfectly on retry.
+    # turned into a "KRA pending" invoice. On that date 58 submitted invoices
+    # were sitting flagged, 54 of them with no KRA figures at all, and every
+    # CUIN sampled from that set resolved first time on a manual retry.
     #
     # So the failure is a dropped request, not a slow one: a short read
     # timeout with more attempts beats one long wait. Three attempts at
