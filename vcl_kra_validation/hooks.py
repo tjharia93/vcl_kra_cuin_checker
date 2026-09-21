@@ -25,13 +25,23 @@ fixtures = [
 
 after_install = "vcl_kra_validation.install.after_install"
 
-# Daily verification job. The ONLY place invoices are checked against KRA —
-# there is no on-form checker on Sales Invoice (see patches/retire_si_form_checker).
-# Covers Local Purchase invoices posted that day, and every submitted VCL Sales
-# Invoice carrying a CUIN that has not been verified since it last changed;
-# emails the result to purchasing@vimit.com. 19:00 EAT = 16:00 UTC.
-scheduler_events = {
-    "cron": {
-        "0 16 * * *": ["vcl_kra_validation.scheduled_tasks.daily_verify_kra_invoices"],
-    },
-}
+# RETIRED 21/09/2026, on Tanuj's instruction: the nightly KRA sweep no longer
+# runs. Two jobs were firing at 16:00 UTC — this one and a "VCL KRA EOD Daily"
+# Server Script written as a stand-in before the app deployed — so KRA was
+# swept twice a night and two reports went out. Both were stopped, not just
+# the duplicate: verification is now on-form only, at the moment the CUIN is
+# entered, and nothing re-checks an invoice afterwards. That means an invoice
+# flagged custom_kra_pending_verification stays pending until somebody looks
+# at it; as at that date 58 submitted invoices were in that state.
+#
+# scheduled_tasks.daily_verify_kra_invoices is deliberately LEFT IN THE APP so
+# it can still be run on demand. To bring the nightly job back, restore:
+#
+#     scheduler_events = {
+#         "cron": {
+#             "0 16 * * *": ["vcl_kra_validation.scheduled_tasks.daily_verify_kra_invoices"],
+#         },
+#     }
+#
+# and deploy + migrate. The Scheduled Job Type row on the site was also set to
+# stopped, so re-adding the hook alone is not enough — un-stop it as well.

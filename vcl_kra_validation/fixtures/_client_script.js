@@ -29,7 +29,8 @@ function isKraExempt(frm) {
 // KRA portal/iTax outage signatures returned by the server API. When KRA
 // itself is broken (HTML served instead of JSON, network timeout, slow
 // responses) we soft-fail: mark the invoice as pending verification, let
-// it submit, and re-check at end of day via the scheduled job.
+// it submit, and flag it for somebody to follow up. NOTE: since 21/09/2026
+// nothing re-checks it automatically — the nightly sweep was retired.
 const VCL_KRA_DOWN_PATTERNS = [
     /Non-JSON response from KRA/i,
     /KRA portal unreachable/i,
@@ -144,7 +145,7 @@ function runKraValidation(frm, cuin) {
                         message:
                             '<p>' + __('KRA could not be reached to validate <b>{0}</b> right now. This is on KRA\'s side, not yours.', [cuin]) + '</p>' +
                             '<p><b>' + __('KRA response:') + '</b> ' + frappe.utils.escape_html(d.error || '') + '</p>' +
-                            '<p>' + __('This invoice has been flagged as <b>KRA pending verification</b>. You can save and submit normally — the daily verification job will re-check this CUIN at end of day and email the result to purchasing@vimit.com.') + '</p>',
+                            '<p>' + __('This invoice has been flagged as <b>KRA pending verification</b>. You can save and submit normally, but <b>nothing re-checks it for you</b> — the nightly verification sweep was retired on 21/09/2026. Come back and re-enter the CUIN once KRA is answering again.') + '</p>',
                         indicator: 'orange',
                     });
                     return;
@@ -333,8 +334,9 @@ frappe.ui.form.on('Purchase Invoice', {
         if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
 
         // Soft-fail path: KRA was unreachable at entry time, so the invoice
-        // has been marked pending verification. Allow submit — the daily job
-        // will re-verify and report to purchasing@vimit.com.
+        // has been marked pending verification. Allow submit. Nothing re-checks
+        // it afterwards (nightly sweep retired 21/09/2026) — the flag is a
+        // marker for a human, not a queue that drains itself.
         if (frm.doc.custom_kra_pending_verification) return;
 
         // Case A — bill_no missing entirely
@@ -361,7 +363,7 @@ frappe.ui.form.on('Purchase Invoice', {
                     '<li>' + __('Try the CUIN directly on <a href="https://itax.kra.go.ke/KRA-Portal/invoiceNumberChecker.htm" target="_blank">KRA iTax</a> (slashes redirect to eTIMS). If KRA also says "not found", the eTIMS record does not exist.') + '</li>' +
                     '<li>' + __('<b>Contact the supplier</b> — the eTIMS invoice may have been cancelled, never transmitted, or re-issued. Request the latest valid CUIN.') + '</li>' +
                     '</ol>' +
-                    '<p style="margin-top:8px;"><i>' + __('You can keep this invoice as a Draft while you investigate \u2014 or, if you have checked and cannot resolve the CUIN now, use <b>Submit as KRA pending</b> below to submit it anyway and add it to the KRA pending-verification queue for follow-up.') + '</i></p>',
+                    '<p style="margin-top:8px;"><i>' + __('You can keep this invoice as a Draft while you investigate \u2014 or, if you have checked and cannot resolve the CUIN now, use <b>Submit as KRA pending</b> below to submit it anyway and flag it for follow-up. Nothing re-checks a flagged invoice automatically, so it will sit there until someone comes back to it.') + '</i></p>',
                 indicator: 'red',
                 primary_action: {
                     label: __('Submit as KRA pending'),
