@@ -53,24 +53,51 @@ def _validate_itax(invoice_no: str) -> dict:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    try:
-        resp = requests.post(
-            ITAX_URL,
-            data={"invNo": invoice_no},
-            headers=headers,
-            timeout=20,
-        )
-    except requests.RequestException as e:
-        frappe.log_error(
-            title="KRA CUIN validate (iTax): network error",
-            message=f"invoice_no={invoice_no}\n{e}",
-        )
-        return {
-            "valid": False,
-            "invoice_no": invoice_no,
-            "error": f"KRA iTax unreachable: {str(e)[:200]}",
-            "source": "itax",
-        }
+    # iTax answers in ~0.3s from the office and ~1.5-2.3s from Frappe Cloud
+    # (London) when it answers at all — but like eTIMS it silently drops
+    # requests in bad windows. On 21/09/2026 it dropped a run of them between
+    # 09:41 and 11:25, every one of which the old flat 20s-no-retry shape
+    # turned into a "KRA pending" invoice. There were 59 such invoices, and
+    # the CUINs on the ones sampled all resolve perfectly on retry.
+    #
+    # So the failure is a dropped request, not a slow one: a short read
+    # timeout with more attempts beats one long wait. Three attempts at
+    # (10s connect, 20s read) = 90s worst case, inside Frappe Cloud's ~120s
+    # proxy limit, with the normal case still answering in about two seconds.
+    attempts = (1, 2, 3)
+    for attempt in attempts:
+        try:
+            resp = requests.post(
+                ITAX_URL,
+                data={"invNo": invoice_no},
+                headers=headers,
+                timeout=(10, 20),
+            )
+            break
+        except requests.exceptions.ReadTimeout as e:
+            if attempt < attempts[-1]:
+                continue
+            frappe.log_error(
+                title="KRA CUIN validate (iTax): read timeout after 3 attempts",
+                message=f"invoice_no={invoice_no}\n{e}",
+            )
+            return {
+                "valid": False,
+                "invoice_no": invoice_no,
+                "error": "KRA iTax is responding slowly and did not answer in time. Read timed out.",
+                "source": "itax",
+            }
+        except requests.RequestException as e:
+            frappe.log_error(
+                title="KRA CUIN validate (iTax): network error",
+                message=f"invoice_no={invoice_no}\n{e}",
+            )
+            return {
+                "valid": False,
+                "invoice_no": invoice_no,
+                "error": f"KRA iTax unreachable: {str(e)[:200]}",
+                "source": "itax",
+            }
 
     try:
         data = resp.json()
@@ -92,13 +119,39 @@ def _validate_itax(invoice_no: str) -> dict:
             "source": "itax",
         }
 
-    err = data.get("errorDTO") or {}
+    # KRA uses BOTH spellings, depending on the branch it takes: the success
+    # payload carries an empty ``errorDTO``, while the failure payload carries
+    # ``errorDto`` (lowercase d) alongside ``isError: "true"``. Reading only
+    # ``errorDTO`` swallowed every message KRA actually sends and fell through
+    # to the generic "returned no invoice data" below. Verified against live
+    # iTax on 21/09/2026:
+    #
+    #   invNo=1  -> {"isError":"true","errorDto":{"msg":"Please enter valid
+    #               Middleware Invoice Number","errorCode":"Error"}}
+    #
+    # ``is_rejected`` means only "KRA answered with an error of its own". KRA
+    # returns that SAME message for a number that is not a CUIN at all and for
+    # a well-formed CUIN it does not know (0190438130000000000 gives it too),
+    # so do not build a "malformed vs not found" distinction on it.
+    err = data.get("errorDTO") or data.get("errorDto") or {}
+    if not isinstance(err, dict):
+        err = {}
     if err.get("msg"):
         return {
             "valid": False,
             "invoice_no": invoice_no,
             "error": err.get("msg"),
             "source": "itax",
+            "is_rejected": True,
+        }
+
+    if str(data.get("isError") or "").strip().lower() == "true":
+        return {
+            "valid": False,
+            "invoice_no": invoice_no,
+            "error": "KRA iTax rejected this invoice number",
+            "source": "itax",
+            "is_rejected": True,
         }
 
     if not data.get("mwInvNo"):
@@ -149,22 +202,35 @@ def _validate_etims(invoice_no: str) -> dict:
     # is unreachable but wait long enough for the receipt page to render.
     # One retry on read-timeout covers transient slowness without doubling
     # the best-case latency.
+    #
+    # Measured against live eTIMS on 21/09/2026: of five requests for CUINs
+    # known to exist, three hung until the client gave up and two answered in
+    # 1.1s and 2.0s. The SAME CUIN failed and then succeeded, and a CUIN that
+    # had just succeeded then failed — so eTIMS drops requests at random, it
+    # does not reject particular receipts. Retrying is therefore the whole
+    # fix, and a long read timeout only delays the retry that actually works.
+    #
+    # Three attempts at (10s connect, 25s read) = 105s worst case, inside
+    # Frappe Cloud's ~120s proxy limit. The previous shape (two attempts,
+    # 60s read) could reach 140s, so the proxy killed the request first and
+    # the user got a gateway error instead of our own message.
     last_error = None
-    for attempt in (1, 2):
+    attempts = (1, 2, 3)
+    for attempt in attempts:
         try:
             resp = requests.get(
                 ETIMS_URL,
                 params={"Data": data_param},
                 headers=headers,
-                timeout=(10, 60),
+                timeout=(10, 25),
             )
             break
         except requests.exceptions.ReadTimeout as e:
             last_error = e
-            if attempt == 1:
+            if attempt < attempts[-1]:
                 continue
             frappe.log_error(
-                title="KRA CUIN validate (eTIMS): read timeout after retry",
+                title="KRA CUIN validate (eTIMS): read timeout after 3 attempts",
                 message=f"invoice_no={invoice_no}\n{e}",
             )
             return {

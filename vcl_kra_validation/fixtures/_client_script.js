@@ -130,7 +130,7 @@ function runKraValidation(frm, cuin) {
         method: 'vcl_kra_validation.api.validate_cuin',
         args: { invoice_no: cuin },
         freeze: true,
-        freeze_message: __('Validating CUIN on KRA…'),
+        freeze_message: __('Validating CUIN on KRA… (KRA can take up to a minute)'),
         callback(r) {
             const d = r.message || {};
             if (!d.valid) {
@@ -164,6 +164,7 @@ function runKraValidation(frm, cuin) {
                         '<br><br><p><b>' + __('What to do:') + '</b></p>' +
                         '<ol style="margin:4px 0 8px 18px; padding:0;">' +
                         '<li>' + __('Re-check the CUIN against the supplier\'s tax invoice — every digit matters.') + '</li>' +
+                        '<li>' + __('Check the <b>shape</b> of what you entered. A CUIN is either a long digit string (e.g. <code>0190438130000017933</code>) or an eTIMS number like <code>KRACU0100065004/379</code>. KRA answers <i>\"Please enter valid Middleware Invoice Number\"</i> both for a number it does not know and for one that is not a CUIN at all.') + '</li>' +
                         '<li>' + __('Try the CUIN directly on <a href="https://itax.kra.go.ke/KRA-Portal/invoiceNumberChecker.htm" target="_blank">KRA iTax</a> (slash-containing CUINs redirect to <a href="https://etims.kra.go.ke/common/link/etims/receipt/indexEtimsInvoiceData" target="_blank">eTIMS</a>).') + '</li>' +
                         '<li>' + __('If KRA also says "not found", <b>contact the supplier</b> — the eTIMS invoice may have been cancelled, re-issued, or never transmitted to KRA.') + '</li>' +
                         '</ol>' +
