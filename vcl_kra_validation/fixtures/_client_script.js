@@ -112,7 +112,20 @@ function reviewChecklist() {
         <p style="margin-top:8px;">If you cannot reconcile the difference, <b>contact the supplier</b> to confirm the correct figures or request the latest CUIN.</p>`;
 }
 
+// A CUIN is a long KRA control number (19-20 digits), or an eTIMS reference
+// containing a slash. Anything shorter is someone still typing.
+//
+// Added 21/09/2026: there was no guard at all, so every partial value went to
+// KRA. Typing "1" and pausing produced a real "KRA did not recognise 1" dialog,
+// because Frappe commits bill_no on its own change cycle mid-typing.
+function looksLikeCuin(cuin) {
+    const v = (cuin || '').trim();
+    if (v.indexOf('/') !== -1) return v.length >= 8;   // eTIMS style
+    return /^[A-Za-z0-9-]{15,}$/.test(v);              // iTax control number
+}
+
 function runKraValidation(frm, cuin) {
+    if (!looksLikeCuin(cuin)) return;   // still typing — do not bother KRA
     frappe.call({
         method: 'vcl_kra_validation.api.validate_cuin',
         args: { invoice_no: cuin },
@@ -215,6 +228,7 @@ function attachKraBlurHandler(frm) {
             return;
         }
         if (cuin === _vclKraLastCuin) return; // unchanged since last validation
+        if (!looksLikeCuin(cuin)) return;     // half-typed — wait for a real CUIN
         _vclKraLastCuin = cuin;
         runKraValidation(frm, cuin);
     });
@@ -261,6 +275,17 @@ frappe.ui.form.on('Purchase Invoice', {
         }
         if (!isLocalPurchase(frm) || isKraExempt(frm)) return;
         if (cuin === _vclKraLastCuin) return;
+
+        // Do NOT validate while the user is still in the field. Frappe commits
+        // bill_no on its own debounced change cycle, so a pause in typing used
+        // to fire a KRA call on a half-entered number. The blur handler covers
+        // the normal path; this stays as the safety net for paste-then-Save,
+        // which only happens once focus has already moved on.
+        const el = frm.fields_dict && frm.fields_dict.bill_no
+                   && frm.fields_dict.bill_no.$input && frm.fields_dict.bill_no.$input[0];
+        if (el && document.activeElement === el) return;
+
+        if (!looksLikeCuin(cuin)) return;
         _vclKraLastCuin = cuin;
         runKraValidation(frm, cuin);
     },
