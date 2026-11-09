@@ -11,6 +11,7 @@ Both paths return the same response dict shape so the client script does not
 need to know which portal served the data.
 """
 
+import time
 import html
 import re
 
@@ -32,18 +33,46 @@ USER_AGENT = (
 )
 
 
+def _attempt_timeout(deadline_at, default):
+    """(connect, read) seconds for the next attempt. Without a deadline: the portal's usual long shape.
+    With one: short attempts that fit what is left (KRA drops requests, it rarely answers slowly), and
+    None once the budget is spent."""
+    if deadline_at is None:
+        return default
+    left = deadline_at - time.monotonic()
+    if left < 1:
+        return None
+    return (min(3, left), min(5, left))
+
+
+def _budget_spent(invoice_no, source, last_error):
+    return {
+        "valid": False,
+        "invoice_no": invoice_no,
+        "error": "KRA did not answer within the time limit. The invoice will be re-checked daily.",
+        "source": source,
+        "timed_out": True,
+        "last_error": str(last_error)[:200] if last_error else None,
+    }
+
+
 @frappe.whitelist()
-def validate_cuin(invoice_no: str) -> dict:
+def validate_cuin(invoice_no: str, deadline=None) -> dict:
+    """`deadline`: total seconds to spend on KRA (several short attempts). Omitted: the original long retry shape."""
     invoice_no = (invoice_no or "").strip()
     if not invoice_no:
         return {"valid": False, "error": "invoice_no is required"}
+    try:
+        deadline_at = time.monotonic() + float(deadline) if deadline else None
+    except (TypeError, ValueError):
+        deadline_at = None
 
     if "/" in invoice_no:
-        return _validate_etims(invoice_no)
-    return _validate_itax(invoice_no)
+        return _validate_etims(invoice_no, deadline_at)
+    return _validate_itax(invoice_no, deadline_at)
 
 
-def _validate_itax(invoice_no: str) -> dict:
+def _validate_itax(invoice_no: str, deadline_at=None) -> dict:
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": ITAX_REFERER,
@@ -65,17 +94,25 @@ def _validate_itax(invoice_no: str) -> dict:
     # timeout with more attempts beats one long wait. Three attempts at
     # (10s connect, 20s read) = 90s worst case, inside Frappe Cloud's ~120s
     # proxy limit, with the normal case still answering in about two seconds.
-    attempts = (1, 2, 3)
+    attempts = (1, 2, 3) if deadline_at is None else range(1, 60)
+    last_error = None
     for attempt in attempts:
+        to = _attempt_timeout(deadline_at, (10, 20))
+        if to is None:
+            return _budget_spent(invoice_no, "itax", last_error)
         try:
             resp = requests.post(
                 ITAX_URL,
                 data={"invNo": invoice_no},
                 headers=headers,
-                timeout=(10, 20),
+                timeout=to,
             )
             break
         except requests.exceptions.ReadTimeout as e:
+            last_error = e
+            if deadline_at is not None:
+                time.sleep(0.3)
+                continue
             if attempt < attempts[-1]:
                 continue
             frappe.log_error(
@@ -89,6 +126,10 @@ def _validate_itax(invoice_no: str) -> dict:
                 "source": "itax",
             }
         except requests.RequestException as e:
+            last_error = e
+            if deadline_at is not None:
+                time.sleep(0.3)
+                continue
             frappe.log_error(
                 title="KRA CUIN validate (iTax): network error",
                 message=f"invoice_no={invoice_no}\n{e}",
@@ -187,7 +228,7 @@ def _validate_itax(invoice_no: str) -> dict:
     }
 
 
-def _validate_etims(invoice_no: str) -> dict:
+def _validate_etims(invoice_no: str, deadline_at=None) -> dict:
     # eTIMS accepts the CUIN in the Data query param with the slash swapped
     # for a dash (that's how KRA's own redirect from iTax rewrites it).
     data_param = invoice_no.replace("/", "-")
@@ -216,18 +257,24 @@ def _validate_etims(invoice_no: str) -> dict:
     # 60s read) could reach 140s, so the proxy killed the request first and
     # the user got a gateway error instead of our own message.
     last_error = None
-    attempts = (1, 2, 3)
+    attempts = (1, 2, 3) if deadline_at is None else range(1, 60)
     for attempt in attempts:
+        to = _attempt_timeout(deadline_at, (10, 25))
+        if to is None:
+            return _budget_spent(invoice_no, "etims", last_error)
         try:
             resp = requests.get(
                 ETIMS_URL,
                 params={"Data": data_param},
                 headers=headers,
-                timeout=(10, 25),
+                timeout=to,
             )
             break
         except requests.exceptions.ReadTimeout as e:
             last_error = e
+            if deadline_at is not None:
+                time.sleep(0.3)
+                continue
             if attempt < attempts[-1]:
                 continue
             frappe.log_error(
@@ -241,6 +288,10 @@ def _validate_etims(invoice_no: str) -> dict:
                 "source": "etims",
             }
         except requests.RequestException as e:
+            last_error = e
+            if deadline_at is not None:
+                time.sleep(0.3)
+                continue
             frappe.log_error(
                 title="KRA CUIN validate (eTIMS): network error",
                 message=f"invoice_no={invoice_no}\n{e}",
